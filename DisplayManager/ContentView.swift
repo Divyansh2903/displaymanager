@@ -47,6 +47,8 @@ struct ContentView: View {
     @State private var selectedProfileID: UUID?
     @State private var showDeleteAlert = false
     @State private var profileToDelete: DisplayProfile?
+    @State private var applyingProfileID: UUID?
+    @State private var appliedProfileID: UUID?
     
     var body: some View {
         VStack(spacing: 12) {
@@ -80,10 +82,24 @@ struct ContentView: View {
             
             if !savedProfiles.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Saved Profiles")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal)
+                    HStack {
+                        Text("Saved Profiles")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        
+                        if let appliedID = appliedProfileID,
+                           let appliedProfile = savedProfiles.first(where: { $0.id == appliedID }) {
+                            Spacer()
+                            Text("Applied: \(appliedProfile.name)")
+                                .font(.caption)
+                                .foregroundColor(.green)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.green.opacity(0.1))
+                                .cornerRadius(4)
+                        }
+                    }
+                    .padding(.horizontal)
                     
                     ScrollView {
                         LazyVStack(spacing: 4) {
@@ -91,8 +107,13 @@ struct ContentView: View {
                                 ProfileRow(
                                     profile: profile,
                                     isSelected: selectedProfileID == profile.id,
+                                    isApplying: applyingProfileID == profile.id,
+                                    isApplied: appliedProfileID == profile.id,
                                     onSelect: { selectedProfileID = profile.id },
-                                    onApply: { executeProfile(profile) },
+                                    onApply: {
+                                        applyingProfileID = profile.id
+                                        executeProfile(profile)
+                                    },
                                     onDelete: {
                                         profileToDelete = profile
                                         showDeleteAlert = true
@@ -140,6 +161,7 @@ struct ContentView: View {
         .padding(.vertical)
         .onAppear {
             savedProfiles = loadProfiles()
+            appliedProfileID = loadAppliedProfileID()
             if let first = savedProfiles.first {
                 selectedProfileID = first.id
             }
@@ -251,6 +273,18 @@ struct ContentView: View {
         return appDir.appendingPathComponent("profiles.json")
     }
     
+    func getAppliedProfileFileURL() -> URL {
+        let manager = FileManager.default
+        let supportDir = manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let appDir = supportDir.appendingPathComponent("DisplayManager")
+        
+        if !manager.fileExists(atPath: appDir.path) {
+            try? manager.createDirectory(at: appDir, withIntermediateDirectories: true)
+        }
+        
+        return appDir.appendingPathComponent("applied_profile.json")
+    }
+    
     func saveProfile(name: String, arguments: [String]) {
         let newProfile = DisplayProfile(name: name, arguments: arguments)
         var profiles = loadProfiles()
@@ -276,12 +310,19 @@ struct ContentView: View {
             if selectedProfileID == profile.id {
                 selectedProfileID = savedProfiles.first?.id
             }
+            
+            
+            if appliedProfileID == profile.id {
+                appliedProfileID = nil
+                saveAppliedProfileID(nil)
+            }
         }
     }
     
     func executeProfile(_ profile: DisplayProfile) {
         guard let path = Bundle.main.path(forResource: "displayplacer", ofType: "") else {
             print("❌ displayplacer binary not found in bundle")
+            applyingProfileID = nil
             return
         }
         
@@ -292,8 +333,17 @@ struct ContentView: View {
         do {
             try process.run()
             print("✅ Applied profile: \(profile.name)")
+            
+            
+            appliedProfileID = profile.id
+            saveAppliedProfileID(profile.id)
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                applyingProfileID = nil
+            }
         } catch {
             print("❌ Failed to apply profile: \(error)")
+            applyingProfileID = nil
         }
     }
     
@@ -305,55 +355,115 @@ struct ContentView: View {
         }
         return []
     }
+    
+    func saveAppliedProfileID(_ profileID: UUID?) {
+        let url = getAppliedProfileFileURL()
+        if let profileID = profileID {
+            let data = try? JSONEncoder().encode(["appliedProfileID": profileID.uuidString])
+            try? data?.write(to: url)
+        } else {
+            
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+    
+    func loadAppliedProfileID() -> UUID? {
+        let url = getAppliedProfileFileURL()
+        if let data = try? Data(contentsOf: url),
+           let dict = try? JSONDecoder().decode([String: String].self, from: data),
+           let uuidString = dict["appliedProfileID"] {
+            return UUID(uuidString: uuidString)
+        }
+        return nil
+    }
 }
 
 struct ProfileRow: View {
     let profile: DisplayProfile
     let isSelected: Bool
+    let isApplying: Bool
+    let isApplied: Bool
     let onSelect: () -> Void
     let onApply: () -> Void
     let onDelete: () -> Void
     
+    @State private var loadingOffset: CGFloat = -300
+    
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text(profile.name)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(isSelected ? .white : .primary)
+                HStack {
+                    Text(profile.name)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.primary)
+                    
+                    if isApplied {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundColor(.green)
+                    }
+                }
                 
                 Text("\(profile.arguments.count) display\(profile.arguments.count == 1 ? "" : "s")")
                     .font(.caption)
-                    .foregroundColor(isSelected ? .white.opacity(0.8) : .secondary)
+                    .foregroundColor(.secondary)
             }
             
             Spacer()
             
             HStack(spacing: 4) {
                 Button(action: onApply) {
-                    Image(systemName: "play.fill")
-                        .font(.caption)
-                        .foregroundColor(isSelected ? .white : .blue)
+                    if isApplying {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .blue))
+                            .scaleEffect(0.7)
+                    } else {
+                        Image(systemName: isApplied ? "checkmark" : "play.fill")
+                            .font(.caption)
+                            .foregroundColor(isApplied ? .green : .blue)
+                    }
                 }
                 .buttonStyle(PlainButtonStyle())
-                .help("Apply profile")
+                .help(isApplied ? "Currently applied" : "Apply profile")
+                .disabled(isApplying)
                 
                 Button(action: onDelete) {
                     Image(systemName: "trash")
                         .font(.caption)
-                        .foregroundColor(isSelected ? .white.opacity(0.8) : .red)
+                        .foregroundColor(.red)
                 }
                 .buttonStyle(PlainButtonStyle())
                 .help("Delete profile")
+                .disabled(isApplying)
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(isSelected ? Color.blue : Color.clear)
+        .background(isApplied ? Color.green.opacity(0.1) : Color.gray.opacity(0.05))
         .cornerRadius(6)
         .contentShape(Rectangle())
-        .onTapGesture {
-            onSelect()
-        }
         .padding(.horizontal, 4)
+        .overlay(
+            Rectangle()
+                .fill(LinearGradient(
+                    gradient: Gradient(colors: [.clear, .white.opacity(0.6), .clear]),
+                    startPoint: .leading,
+                    endPoint: .trailing
+                ))
+                .frame(width: 50)
+                .offset(x: loadingOffset)
+                .opacity(isApplying ? 1 : 0)
+                .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: false), value: isApplying)
+        )
+        .onChange(of: isApplying) { applying in
+            if applying {
+                loadingOffset = -300
+                withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: false)) {
+                    loadingOffset = 300
+                }
+            } else {
+                loadingOffset = -300
+            }
+        }
     }
 }
