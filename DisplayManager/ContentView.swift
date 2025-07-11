@@ -1,47 +1,172 @@
 import SwiftUI
 import AppKit
+import CoreGraphics
 
 struct DisplayProfile: Codable, Identifiable {
     var id = UUID()
     var name: String
     var arguments: [String]
+    var fullOutput: String?
+}
+
+struct DisplayRect: Identifiable {
+    let id = UUID()
+    var origin: CGPoint
+    var size: CGSize
+    var displayName: String?
+}
+
+private extension String {
+    func capturedGroups(withRegex pattern: String) -> [String]? {
+        guard
+            let regex = try? NSRegularExpression(pattern: pattern),
+            let match = regex.firstMatch(in: self, range: NSRange(location: 0, length: (self as NSString).length))
+        else { return nil }
+        return (1..<match.numberOfRanges).compactMap {
+            let range = match.range(at: $0)
+            guard range.location != NSNotFound else { return nil }
+            return (self as NSString).substring(with: range)
+        }
+    }
+}
+
+//private func parseDisplayRect(from token: String) -> DisplayRect? {
+//    guard
+//        let res = token.capturedGroups(withRegex: #"res:(\d+)x(\d+)"#),
+//        let org = token.capturedGroups(withRegex: #"origin:\(([-\d]+),([-\d]+)\)"#),
+//        let w = Double(res[0]), let h = Double(res[1]),
+//        let x = Double(org[0]), let y = Double(org[1])
+//    else { return nil }
+//    let displayName = token.capturedGroups(withRegex: #"id:([A-F0-9-]+)"#)?[0] ?? "Display"
+//    return DisplayRect(
+//        origin: .init(x: x, y: y),
+//        size: .init(width: w, height: h),
+//        displayName: displayName
+//    )
+//}
+private func parseDisplayRect(from token: String, idToType: [String: String]) -> DisplayRect? {
+    guard
+        let res = token.capturedGroups(withRegex: #"res:(\d+)x(\d+)"#),
+        let org = token.capturedGroups(withRegex: #"origin:\(([-\d]+),([-\d]+)\)"#),
+        let w = Double(res[0]), let h = Double(res[1]),
+        let x = Double(org[0]), let y = Double(org[1])
+    else { return nil }
+    let id = token.capturedGroups(withRegex: #"id:([A-F0-9-]+)"#)?[0]
+    let displayName = id.flatMap { idToType[$0] } ?? "Display"
+    return DisplayRect(
+        origin: .init(x: x, y: y),
+        size: .init(width: w, height: h),
+        displayName: displayName
+    )
+}
+
+func parseDisplayTypes(from fullOutput: String) -> [String: String] {
+    var result: [String: String] = [:]
+    let blocks = fullOutput.components(separatedBy: "Persistent screen id:").dropFirst()
+    for block in blocks {
+        let trimmedBlock = block.trimmingCharacters(in: .whitespacesAndNewlines)
+        let id = trimmedBlock.capturedGroups(withRegex: #"^([A-F0-9-]+)"#)?.first
+        let type = trimmedBlock.capturedGroups(withRegex: #"Type:\s*(.+)"#)?.first
+        if let id, let type {
+            result[id] = type
+        }
+    }
+    return result
+}
+
+
+
+private func normalisedRects(from rects: [DisplayRect], target: CGSize) -> [(rect: CGRect, name: String)] {
+    guard !rects.isEmpty else { return [] }
+    let minX = rects.map { $0.origin.x }.min()!
+    let minY = rects.map { $0.origin.y }.min()!
+    let shifted = rects.map { r in
+        CGRect(origin: .init(x: r.origin.x - minX, y: r.origin.y - minY), size: r.size)
+    }
+    let union = shifted.reduce(CGRect.zero) { $0.union($1) }
+    let scale = min(target.width / union.width, target.height / union.height)
+    let scaledUnion = CGRect(x: 0, y: 0, width: union.width * scale, height: union.height * scale)
+    let offsetX = (target.width - scaledUnion.width) / 2
+    let offsetY = (target.height - scaledUnion.height) / 2
+    return zip(shifted, rects).map { (shiftedRect, originalRect) in
+        let scaledRect = CGRect(
+            x: shiftedRect.minX * scale + offsetX,
+            y: shiftedRect.minY * scale + offsetY,
+            width: shiftedRect.width * scale,
+            height: shiftedRect.height * scale
+        )
+        let displayName = originalRect.displayName ?? "Display"
+        return (rect: scaledRect, name: displayName)
+    }
+}
+
+struct ArrangementPreview: View {
+
+    let rectsWithNames: [(rect: CGRect, name: String)]
+    let frameSize: CGSize
+    var body: some View {
+        ZStack {
+            ForEach(rectsWithNames.indices, id: \.self) { i in
+                let item = rectsWithNames[i]
+                Rectangle()
+                    .stroke(Color.accentColor, lineWidth: 1)
+                    .background(Color.accentColor.opacity(0.15))
+                    .frame(width: item.rect.width, height: item.rect.height)
+                    .position(x: item.rect.midX, y: item.rect.midY)
+                    .overlay(
+                        VStack(spacing: 2) {
+                            Text("\(i + 1)")
+                                .font(.caption.weight(.bold))
+                                .foregroundColor(.primary)
+                            Text(shortenDisplayName(item.name))
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                        }
+                        .position(x: item.rect.midX, y: item.rect.midY)
+                    )
+            }
+        }
+        .frame(width: frameSize.width, height: frameSize.height)
+        .background(Color.gray.opacity(0.08))
+        .cornerRadius(4)
+    }
+    private func shortenDisplayName(_ name: String) -> String {
+        if name.count > 8 && name.contains("-") {
+            return String(name.prefix(8))
+        }
+        return name.count > 10 ? String(name.prefix(10)) + "..." : name
+    }
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
-    
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "display.2", accessibilityDescription: "Display Manager")
             button.action = #selector(togglePopover)
             button.target = self
         }
-        
         popover = NSPopover()
         popover.contentViewController = NSHostingController(rootView: ContentView())
         popover.behavior = .transient
         popover.contentSize = NSSize(width: 280, height: 400)
-        
         NSApp.setActivationPolicy(.accessory)
     }
-    
-    @objc func togglePopover() {
-        if let button = statusItem.button {
-            if popover.isShown {
-                popover.performClose(nil)
-            } else {
-                popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            }
-        }
+    @objc private func togglePopover() {
+        guard let button = statusItem.button else { return }
+        popover.isShown
+            ? popover.performClose(nil)
+            : popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
     }
 }
 
 struct ContentView: View {
     @State private var showSaveDialog = false
     @State private var displayArguments: [String] = []
+    @State private var displayplacerFullOutput: String? = nil
     @State private var profileName = ""
     @State private var savedProfiles: [DisplayProfile] = []
     @State private var selectedProfileID: UUID?
@@ -49,24 +174,18 @@ struct ContentView: View {
     @State private var profileToDelete: DisplayProfile?
     @State private var applyingProfileID: UUID?
     @State private var appliedProfileID: UUID?
-    
     var body: some View {
         VStack(spacing: 12) {
             HStack {
                 Image(systemName: "display.2")
                     .font(.title2)
                     .foregroundColor(.blue)
-                Text("Display Manager")
-                    .font(.headline)
+                Text("Display Manager").font(.headline)
                 Spacer()
             }
             .padding(.horizontal)
-            
             Divider()
-            
-            Button(action: {
-                runDisplayplacerListAndCapture()
-            }) {
+            Button(action: runDisplayplacerListAndCapture) {
                 HStack {
                     Image(systemName: "plus.circle.fill")
                     Text("Save Current Setup")
@@ -79,16 +198,14 @@ struct ContentView: View {
             }
             .buttonStyle(PlainButtonStyle())
             .padding(.horizontal)
-            
             if !savedProfiles.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("Saved Profiles")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
-                        
                         if let appliedID = appliedProfileID,
-                           let appliedProfile = savedProfiles.first(where: { $0.id == appliedID }) {
+                            let appliedProfile = savedProfiles.first(where: { $0.id == appliedID }) {
                             Spacer()
                             Text("Applied: \(appliedProfile.name)")
                                 .font(.caption)
@@ -100,7 +217,6 @@ struct ContentView: View {
                         }
                     }
                     .padding(.horizontal)
-                    
                     ScrollView {
                         LazyVStack(spacing: 4) {
                             ForEach(savedProfiles) { profile in
@@ -139,18 +255,12 @@ struct ContentView: View {
                 }
                 .padding()
             }
-            
             Divider()
-            
             HStack {
-                Button("Quit") {
-                    NSApplication.shared.terminate(nil)
-                }
-                .buttonStyle(PlainButtonStyle())
-                .foregroundColor(.red)
-                
+                Button("Quit") { NSApplication.shared.terminate(nil) }
+                    .buttonStyle(PlainButtonStyle())
+                    .foregroundColor(.red)
                 Spacer()
-                
                 Text("v1.0")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -162,219 +272,147 @@ struct ContentView: View {
         .onAppear {
             savedProfiles = loadProfiles()
             appliedProfileID = loadAppliedProfileID()
-            if let first = savedProfiles.first {
-                selectedProfileID = first.id
-            }
+            selectedProfileID = savedProfiles.first?.id
         }
-        .alert("Save as Profile", isPresented: $showSaveDialog, actions: {
+        .alert("Save as Profile", isPresented: $showSaveDialog) {
             TextField("Profile Name", text: $profileName)
             Button("Save") {
                 saveProfile(name: profileName, arguments: displayArguments)
                 profileName = ""
+                displayplacerFullOutput = nil
                 savedProfiles = loadProfiles()
             }
             Button("Cancel", role: .cancel) { }
-        })
-        .alert("Delete Profile", isPresented: $showDeleteAlert, actions: {
+        }
+        .alert("Delete Profile", isPresented: $showDeleteAlert) {
             Button("Delete", role: .destructive) {
-                if let profile = profileToDelete {
-                    deleteProfile(profile)
-                    profileToDelete = nil
-                }
+                if let profile = profileToDelete { deleteProfile(profile) }
             }
-            Button("Cancel", role: .cancel) {
-                profileToDelete = nil
-            }
-        }, message: {
+            Button("Cancel", role: .cancel) { profileToDelete = nil }
+        } message: {
             Text("Are you sure you want to delete '\(profileToDelete?.name ?? "")'?")
-        })
+        }
     }
-    
-    func runDisplayplacerListAndCapture() {
+    private func runDisplayplacerListAndCapture() {
         guard let path = Bundle.main.path(forResource: "displayplacer", ofType: "") else {
-            print("❌ displayplacer binary not found in bundle")
+            print("❌ displayplacer binary not found")
             return
         }
-        
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = ["list"]
-        
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
-        
-        do {
-            try process.run()
-        } catch {
-            print("❌ Failed to run displayplacer: \(error)")
-            return
-        }
-        
+        do    { try process.run() }
+        catch { print("❌ Failed to run displayplacer: \(error)"); return }
         process.terminationHandler = { _ in
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
-            
+            let output = String(decoding: data, as: UTF8.self)
             DispatchQueue.main.async {
                 self.displayArguments = self.extractDisplayplacerCommand(from: output)
+                self.displayplacerFullOutput = output
                 self.showSaveDialog = true
             }
         }
     }
-
-    func extractDisplayplacerCommand(from output: String) -> [String] {
-        let lines = output.components(separatedBy: .newlines)
-        
-        for line in lines {
-            let trimmedLine = line.trimmingCharacters(in: .whitespaces)
-            if trimmedLine.hasPrefix("displayplacer ") {
-                let argumentString = trimmedLine.replacingOccurrences(of: "displayplacer ", with: "")
-                return parseDisplayplacerArguments(argumentString)
+    private func extractDisplayplacerCommand(from output: String) -> [String] {
+        output
+            .components(separatedBy: .newlines)
+            .compactMap { line -> [String]? in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard trimmed.hasPrefix("displayplacer ") else { return nil }
+                let argString = trimmed.replacingOccurrences(of: "displayplacer ", with: "")
+                return parseDisplayplacerArguments(argString)
             }
-        }
-        
-        return []
+            .first ?? []
     }
-    
-    func parseDisplayplacerArguments(_ argumentString: String) -> [String] {
-        var arguments: [String] = []
-        var currentArg = ""
-        var insideQuotes = false
-        
-        for char in argumentString {
-            if char == "\"" {
-                insideQuotes.toggle()
-            } else if char == " " && !insideQuotes {
-                if !currentArg.isEmpty {
-                    arguments.append(currentArg)
-                    currentArg = ""
-                }
-            } else {
-                currentArg.append(char)
-            }
+    private func parseDisplayplacerArguments(_ argString: String) -> [String] {
+        var args: [String] = []
+        var current = "", insideQuotes = false
+        for char in argString {
+            if char == "\""         { insideQuotes.toggle() }
+            else if char == " " && !insideQuotes {
+                if !current.isEmpty { args.append(current); current = "" }
+            } else { current.append(char) }
         }
-        
-        if !currentArg.isEmpty {
-            arguments.append(currentArg)
-        }
-        
-        return arguments
+        if !current.isEmpty { args.append(current) }
+        return args
     }
-    
-    func getProfilesFileURL() -> URL {
+    private func appSupportURL() -> URL {
         let manager = FileManager.default
-        let supportDir = manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let appDir = supportDir.appendingPathComponent("DisplayManager")
-        
+        let dir = manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let appDir = dir.appendingPathComponent("DisplayManager")
         if !manager.fileExists(atPath: appDir.path) {
             try? manager.createDirectory(at: appDir, withIntermediateDirectories: true)
         }
-        
-        return appDir.appendingPathComponent("profiles.json")
+        return appDir
     }
-    
-    func getAppliedProfileFileURL() -> URL {
-        let manager = FileManager.default
-        let supportDir = manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let appDir = supportDir.appendingPathComponent("DisplayManager")
-        
-        if !manager.fileExists(atPath: appDir.path) {
-            try? manager.createDirectory(at: appDir, withIntermediateDirectories: true)
-        }
-        
-        return appDir.appendingPathComponent("applied_profile.json")
-    }
-    
-    func saveProfile(name: String, arguments: [String]) {
-        let newProfile = DisplayProfile(name: name, arguments: arguments)
+    private func getProfilesFileURL()        -> URL { appSupportURL().appendingPathComponent("profiles.json") }
+    private func getAppliedProfileFileURL()  -> URL { appSupportURL().appendingPathComponent("applied_profile.json") }
+    private func saveProfile(name: String, arguments: [String]) {
+        let new = DisplayProfile(name: name, arguments: arguments, fullOutput: displayplacerFullOutput)
         var profiles = loadProfiles()
-        profiles.append(newProfile)
-        
-        let url = getProfilesFileURL()
+        profiles.append(new)
         if let data = try? JSONEncoder().encode(profiles) {
-            try? data.write(to: url)
-            print("✅ Profile saved: \(name)")
+            try? data.write(to: getProfilesFileURL())
+            print("Profile saved to: \(getProfilesFileURL().path)")
         }
     }
-    
-    func deleteProfile(_ profile: DisplayProfile) {
+    private func deleteProfile(_ profile: DisplayProfile) {
         var profiles = loadProfiles()
         profiles.removeAll { $0.id == profile.id }
-        
-        let url = getProfilesFileURL()
         if let data = try? JSONEncoder().encode(profiles) {
-            try? data.write(to: url)
-            print("✅ Profile deleted: \(profile.name)")
+            try? data.write(to: getProfilesFileURL())
             savedProfiles = profiles
-            
-            if selectedProfileID == profile.id {
-                selectedProfileID = savedProfiles.first?.id
-            }
-            
-            
-            if appliedProfileID == profile.id {
-                appliedProfileID = nil
-                saveAppliedProfileID(nil)
-            }
+            if selectedProfileID == profile.id { selectedProfileID = savedProfiles.first?.id }
+            if appliedProfileID  == profile.id { appliedProfileID = nil; saveAppliedProfileID(nil) }
+            print("✅ Profile deleted: \(profile.name)")
         }
     }
-    
-    func executeProfile(_ profile: DisplayProfile) {
+    private func executeProfile(_ profile: DisplayProfile) {
         guard let path = Bundle.main.path(forResource: "displayplacer", ofType: "") else {
-            print("❌ displayplacer binary not found in bundle")
+            print("❌ displayplacer binary not found")
             applyingProfileID = nil
             return
         }
-        
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = profile.arguments
-        
         do {
             try process.run()
             print("✅ Applied profile: \(profile.name)")
-            
-            
             appliedProfileID = profile.id
             saveAppliedProfileID(profile.id)
-            
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                applyingProfileID = nil
-            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { applyingProfileID = nil }
         } catch {
             print("❌ Failed to apply profile: \(error)")
             applyingProfileID = nil
         }
     }
-    
-    func loadProfiles() -> [DisplayProfile] {
-        let url = getProfilesFileURL()
-        if let data = try? Data(contentsOf: url),
-           let profiles = try? JSONDecoder().decode([DisplayProfile].self, from: data) {
-            return profiles
-        }
-        return []
+    private func loadProfiles() -> [DisplayProfile] {
+        guard
+            let data = try? Data(contentsOf: getProfilesFileURL()),
+            let profiles = try? JSONDecoder().decode([DisplayProfile].self, from: data)
+        else { return [] }
+        return profiles
     }
-    
-    func saveAppliedProfileID(_ profileID: UUID?) {
+    private func saveAppliedProfileID(_ id: UUID?) {
         let url = getAppliedProfileFileURL()
-        if let profileID = profileID {
-            let data = try? JSONEncoder().encode(["appliedProfileID": profileID.uuidString])
+        if let id = id {
+            let data = try? JSONEncoder().encode(["appliedProfileID": id.uuidString])
             try? data?.write(to: url)
         } else {
-            
             try? FileManager.default.removeItem(at: url)
         }
     }
-    
-    func loadAppliedProfileID() -> UUID? {
-        let url = getAppliedProfileFileURL()
-        if let data = try? Data(contentsOf: url),
-           let dict = try? JSONDecoder().decode([String: String].self, from: data),
-           let uuidString = dict["appliedProfileID"] {
-            return UUID(uuidString: uuidString)
-        }
-        return nil
+    private func loadAppliedProfileID() -> UUID? {
+        guard
+            let data = try? Data(contentsOf: getAppliedProfileFileURL()),
+            let dict = try? JSONDecoder().decode([String: String].self, from: data),
+            let uuid = dict["appliedProfileID"]
+        else { return nil }
+        return UUID(uuidString: uuid)
     }
 }
 
@@ -386,31 +424,52 @@ struct ProfileRow: View {
     let onSelect: () -> Void
     let onApply: () -> Void
     let onDelete: () -> Void
-    
     @State private var loadingOffset: CGFloat = -300
-    
+    @State private var showPreview = false
+//    private var previewRectsWithNames: [(rect: CGRect, name: String)] {
+//        let dRects = profile.arguments.compactMap(parseDisplayRect)
+//        return normalisedRects(from: dRects, target: CGSize(width: 320, height: 200))
+//    }
+    private var previewRectsWithNames: [(rect: CGRect, name: String)] {
+        let idToType = profile.fullOutput.map(parseDisplayTypes) ?? [:]
+        let dRects = profile.arguments.compactMap { parseDisplayRect(from: $0, idToType: idToType) }
+        return normalisedRects(from: dRects, target: CGSize(width: 320, height: 200))
+    }
+
     var body: some View {
-        HStack {
+        HStack(spacing: 8) {
+            Button(action: {
+//                print(profile.fullOutput)
+                showPreview.toggle()
+            }) {
+
+                Image(systemName: "eye")
+                    .foregroundColor(.primary)
+            }
+            .buttonStyle(PlainButtonStyle())
+            .help("Preview layout")
+            .popover(isPresented: $showPreview) {
+    
+                ArrangementPreview(rectsWithNames: previewRectsWithNames, frameSize: CGSize(width: 320, height: 200))
+                    .padding()
+            }
+
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
                     Text(profile.name)
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(.primary)
-                    
                     if isApplied {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.caption)
                             .foregroundColor(.green)
                     }
                 }
-                
                 Text("\(profile.arguments.count) display\(profile.arguments.count == 1 ? "" : "s")")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
             Spacer()
-            
             HStack(spacing: 4) {
                 Button(action: onApply) {
                     if isApplying {
@@ -426,7 +485,6 @@ struct ProfileRow: View {
                 .buttonStyle(PlainButtonStyle())
                 .help(isApplied ? "Currently applied" : "Apply profile")
                 .disabled(isApplying)
-                
                 Button(action: onDelete) {
                     Image(systemName: "trash")
                         .font(.caption)
@@ -445,11 +503,7 @@ struct ProfileRow: View {
         .padding(.horizontal, 4)
         .overlay(
             Rectangle()
-                .fill(LinearGradient(
-                    gradient: Gradient(colors: [.clear, .white.opacity(0.6), .clear]),
-                    startPoint: .leading,
-                    endPoint: .trailing
-                ))
+                .fill(LinearGradient(gradient: Gradient(colors: [.clear, .white.opacity(0.6), .clear]), startPoint: .leading, endPoint: .trailing))
                 .frame(width: 50)
                 .offset(x: loadingOffset)
                 .opacity(isApplying ? 1 : 0)
@@ -465,5 +519,6 @@ struct ProfileRow: View {
                 loadingOffset = -300
             }
         }
+        .onTapGesture(perform: onSelect)
     }
 }
