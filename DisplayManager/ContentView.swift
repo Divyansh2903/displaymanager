@@ -155,12 +155,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentSize = NSSize(width: 280, height: 400)
         NSApp.setActivationPolicy(.accessory)
     }
+    func popoverDidClose(_ notification: Notification) {
+            print("Popover closed: \(notification.userInfo ?? [:])")
+    }
     @objc private func togglePopover() {
         guard let button = statusItem.button else { return }
-        popover.isShown
-            ? popover.performClose(nil)
-            : popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        if popover.isShown {
+            popover.performClose(nil)
+        } else {
+            DispatchQueue.main.async {
+                self.popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            }
+        }
     }
+
 }
 
 struct ContentView: View {
@@ -174,6 +182,9 @@ struct ContentView: View {
     @State private var profileToDelete: DisplayProfile?
     @State private var applyingProfileID: UUID?
     @State private var appliedProfileID: UUID?
+    @State private var showErrorAlert = false
+    @State private var errorMessage = ""
+
     var body: some View {
         VStack(spacing: 12) {
             HStack {
@@ -269,6 +280,7 @@ struct ContentView: View {
         }
         .frame(width: 280)
         .padding(.vertical)
+        
         .onAppear {
             savedProfiles = loadProfiles()
             appliedProfileID = loadAppliedProfileID()
@@ -277,13 +289,25 @@ struct ContentView: View {
         .alert("Save as Profile", isPresented: $showSaveDialog) {
             TextField("Profile Name", text: $profileName)
             Button("Save") {
-                saveProfile(name: profileName, arguments: displayArguments)
-                profileName = ""
-                displayplacerFullOutput = nil
-                savedProfiles = loadProfiles()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    self.showSaveDialog = false
+                    self.saveProfile(name: self.profileName, arguments: self.displayArguments)
+                    self.profileName = ""
+                    self.displayplacerFullOutput = nil
+                    self.savedProfiles = self.loadProfiles()
+                }
             }
             Button("Cancel", role: .cancel) { }
         }
+
+        .alert("Error", isPresented: $showErrorAlert) {
+                Button("OK") {
+                    showErrorAlert = false
+                    errorMessage = ""
+                }
+            } message: {
+                Text(errorMessage)
+            }
         .alert("Delete Profile", isPresented: $showDeleteAlert) {
             Button("Delete", role: .destructive) {
                 if let profile = profileToDelete { deleteProfile(profile) }
@@ -293,9 +317,13 @@ struct ContentView: View {
             Text("Are you sure you want to delete '\(profileToDelete?.name ?? "")'?")
         }
     }
+    
     private func runDisplayplacerListAndCapture() {
         guard let path = Bundle.main.path(forResource: "displayplacer", ofType: "") else {
-            print("❌ displayplacer binary not found")
+            DispatchQueue.main.async {
+                self.errorMessage = "displayplacer binary not found."
+                self.showErrorAlert = true
+            }
             return
         }
         let process = Process()
@@ -304,9 +332,9 @@ struct ContentView: View {
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
-        do    { try process.run() }
-        catch { print("❌ Failed to run displayplacer: \(error)"); return }
-        process.terminationHandler = { _ in
+        do {
+            try process.run()
+            process.waitUntilExit()  // Ensure completion before reading
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             let output = String(decoding: data, as: UTF8.self)
             DispatchQueue.main.async {
@@ -314,8 +342,38 @@ struct ContentView: View {
                 self.displayplacerFullOutput = output
                 self.showSaveDialog = true
             }
+        } catch {
+            DispatchQueue.main.async {
+                print(error.localizedDescription)
+                self.errorMessage = "Something went wrong!"
+                self.showErrorAlert = true
+            }
         }
     }
+
+//    private func runDisplayplacerListAndCapture() {
+//        guard let path = Bundle.main.path(forResource: "displayplacer", ofType: "") else {
+//            print("❌ displayplacer binary not found")
+//            return
+//        }
+//        let process = Process()
+//        process.executableURL = URL(fileURLWithPath: path)
+//        process.arguments = ["list"]
+//        let pipe = Pipe()
+//        process.standardOutput = pipe
+//        process.standardError = pipe
+//        do    { try process.run() }
+//        catch { print("❌ Failed to run displayplacer: \(error)"); return }
+//        process.terminationHandler = { _ in
+//            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+//            let output = String(decoding: data, as: UTF8.self)
+//            DispatchQueue.main.async {
+//                self.displayArguments = self.extractDisplayplacerCommand(from: output)
+//                self.displayplacerFullOutput = output
+//                self.showSaveDialog = true
+//            }
+//        }
+//    }
     private func extractDisplayplacerCommand(from output: String) -> [String] {
         output
             .components(separatedBy: .newlines)
