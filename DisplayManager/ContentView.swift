@@ -6,7 +6,8 @@ struct DisplayProfile: Codable, Identifiable {
     var id = UUID()
     var name: String
     var arguments: [String]
-    var fullOutput: String?
+    var idToDisplayType: [String: String]?
+
 }
 
 struct DisplayRect: Identifiable {
@@ -409,7 +410,8 @@ struct ContentView: View {
     private func getProfilesFileURL()        -> URL { appSupportURL().appendingPathComponent("profiles.json") }
     private func getAppliedProfileFileURL()  -> URL { appSupportURL().appendingPathComponent("applied_profile.json") }
     private func saveProfile(name: String, arguments: [String]) {
-        let new = DisplayProfile(name: name, arguments: arguments, fullOutput: displayplacerFullOutput)
+        let idToType = displayplacerFullOutput.map(parseDisplayTypes)
+        let new = DisplayProfile(name: name, arguments: arguments, idToDisplayType: idToType)
         var profiles = loadProfiles()
         profiles.append(new)
         if let data = try? JSONEncoder().encode(profiles) {
@@ -484,15 +486,22 @@ struct ProfileRow: View {
     let onDelete: () -> Void
     @State private var loadingOffset: CGFloat = -300
     @State private var showPreview = false
+    @State private var cachedRects: [(rect: CGRect, name: String)]? = nil
 //    private var previewRectsWithNames: [(rect: CGRect, name: String)] {
 //        let dRects = profile.arguments.compactMap(parseDisplayRect)
 //        return normalisedRects(from: dRects, target: CGSize(width: 320, height: 200))
 //    }
     private var previewRectsWithNames: [(rect: CGRect, name: String)] {
-        let idToType = profile.fullOutput.map(parseDisplayTypes) ?? [:]
+        if let cached = cachedRects {
+            return cached
+        }
+        let idToType = profile.idToDisplayType ?? [:]
         let dRects = profile.arguments.compactMap { parseDisplayRect(from: $0, idToType: idToType) }
-        return normalisedRects(from: dRects, target: CGSize(width: 320, height: 200))
+        let result = normalisedRects(from: dRects, target: CGSize(width: 320, height: 200))
+        cachedRects = result
+        return result
     }
+
 
     var body: some View {
         HStack(spacing: 8) {
@@ -507,10 +516,17 @@ struct ProfileRow: View {
             .buttonStyle(PlainButtonStyle())
             .help("Preview layout")
             .popover(isPresented: $showPreview) {
-    
                 ArrangementPreview(rectsWithNames: previewRectsWithNames, frameSize: CGSize(width: 320, height: 200))
                     .padding()
             }
+            .onAppear {
+                if cachedRects == nil {
+                    let idToType = profile.idToDisplayType ?? [:]
+                    let dRects = profile.arguments.compactMap { parseDisplayRect(from: $0, idToType: idToType) }
+                    cachedRects = normalisedRects(from: dRects, target: CGSize(width: 320, height: 200))
+                }
+            }
+
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
@@ -580,3 +596,4 @@ struct ProfileRow: View {
         .onTapGesture(perform: onSelect)
     }
 }
+
