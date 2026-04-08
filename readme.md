@@ -6,7 +6,7 @@ A macOS menu bar app for saving and switching between display configurations.
 ![Swift](https://img.shields.io/badge/Swift-5.0+-orange.svg)
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-5.0+-green.svg)
 
-## Mockup
+## Display Placer
 
 ![Display Manager Mockup](./assets/mockup.png)
 
